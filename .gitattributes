@@ -1,0 +1,3 @@
+*.tbl -text
+*.idx -text
+*.sh text eol=lf
