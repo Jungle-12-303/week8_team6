@@ -1,5 +1,45 @@
 #include "db_api.h"
 
+/*
+ * ============================================================================
+ * [DbApi 코드 리뷰용 흐름 지도]
+ * ============================================================================
+ *
+ * 이 파일의 역할:
+ * - HTTP API 서버와 기존 week7 SQL 엔진 사이의 adapter 역할을 한다.
+ * - 기존 엔진은 FILE* 로 결과를 출력하므로, API 응답용 문자열로 다시 읽어온다.
+ * - 여러 worker thread 가 동시에 들어와도 DB 엔진은 mutex 로 한 번에 하나씩 실행한다.
+ *
+ * 전체 호출 흐름:
+ *
+ * handle_query()                         -- api_server.c
+ *      |
+ *      v
+ * db_api_execute_sql()
+ *      |
+ *      +--> tmpfile()                    -- 엔진 출력 캡처용 임시 FILE*
+ *      |
+ *      +--> mutex_lock()
+ *      |       기존 SQL 엔진/CSV 파일/B+ tree 인덱스 공유 보호
+ *      |
+ *      +--> sql_engine_execute_sql()
+ *      |       SELECT/INSERT 파싱 및 database.c 실행
+ *      |
+ *      +--> read_stream_to_string()
+ *      |       FILE* 결과를 JSON 변환 가능한 char* 로 복사
+ *      |
+ *      +--> mutex_unlock()
+ *      |
+ *      v
+ * DbApiResult 반환
+ *
+ * 왜 mutex 가 필요한가:
+ * thread pool 은 요청을 병렬로 받지만, 기존 저장소 코드는 같은 users.tbl/users.idx
+ * 파일과 SqlEngine 메타데이터를 공유한다. 동시에 INSERT/SELECT 가 섞이면 파일 offset,
+ * B+ tree 상태가 꼬일 수 있어 DB 엔진 실행 구간만 직렬화한다.
+ * ============================================================================
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +88,14 @@ static void mutex_unlock(DbApiMutex *mutex) {
 }
 #endif
 
+/*
+ * tmpfile 에 쌓인 엔진 출력 전체를 heap 문자열로 읽어온다.
+ *
+ * 단계:
+ * 1. fflush 로 엔진이 쓴 내용을 파일에 반영
+ * 2. fseek/ftell 로 출력 길이 계산
+ * 3. 처음으로 되감은 뒤 fread 로 전체 복사
+ */
 static char *read_stream_to_string(FILE *file, char *error_buf, size_t error_buf_size) {
     long length;
     size_t read_size;
@@ -84,6 +132,10 @@ static char *read_stream_to_string(FILE *file, char *error_buf, size_t error_buf
     return buffer;
 }
 
+/*
+ * API 서버 시작 시 한 번 호출된다.
+ * DbApi 구조체 안에 기존 SqlEngine 과 mutex 를 함께 준비한다.
+ */
 int db_api_init(DbApi *api, const char *data_dir, char *error_buf, size_t error_buf_size) {
     DbApiMutex *mutex;
 
@@ -116,6 +168,9 @@ int db_api_init(DbApi *api, const char *data_dir, char *error_buf, size_t error_
     return 1;
 }
 
+/*
+ * 서버 종료 시 DB 엔진과 mutex 를 정리한다.
+ */
 void db_api_free(DbApi *api) {
     if (api == NULL) {
         return;
@@ -130,6 +185,18 @@ void db_api_free(DbApi *api) {
     }
 }
 
+/*
+ * HTTP worker 가 SQL 하나를 실행할 때 호출하는 함수.
+ *
+ * 성공:
+ * - result->ok = 1
+ * - result->output = 엔진이 출력한 CSV/메시지 문자열
+ * - result->stats = 인덱스 사용 여부와 row 통계
+ *
+ * 실패:
+ * - result->ok = 0
+ * - result->error 에 파싱/실행 실패 이유 저장
+ */
 int db_api_execute_sql(DbApi *api, const char *sql_text, DbApiResult *result) {
     FILE *output;
     char capture_error[512];
@@ -185,6 +252,10 @@ int db_api_execute_sql(DbApi *api, const char *sql_text, DbApiResult *result) {
     return 1;
 }
 
+/*
+ * DbApiResult 안의 output 은 heap 문자열이다.
+ * format_query_body() 로 응답을 만든 뒤 반드시 해제해야 한다.
+ */
 void db_api_result_free(DbApiResult *result) {
     if (result == NULL) {
         return;

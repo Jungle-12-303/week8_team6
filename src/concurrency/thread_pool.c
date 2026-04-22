@@ -1,5 +1,49 @@
 #include "thread_pool.h"
 
+/*
+ * ============================================================================
+ * [Thread Pool 코드 리뷰용 흐름 지도]
+ * ============================================================================
+ *
+ * 이 파일의 역할:
+ * - 서버 시작 시 고정 개수의 worker thread 를 만들어 둔다.
+ * - accept loop 에서 들어온 client 작업을 queue 에 넣는다.
+ * - 쉬고 있던 worker 가 queue 에서 작업을 꺼내 handle_client() 를 실행한다.
+ *
+ * 전체 호출 흐름:
+ *
+ * api_server_run()
+ *      |
+ *      +--> thread_pool_create()
+ *      |       worker thread N개 생성
+ *      |       각 worker 는 worker_main() 에서 작업 대기
+ *      |
+ *      +--> accept() 로 클라이언트 연결 수락
+ *      |
+ *      +--> thread_pool_submit(handle_client, task)
+ *              queue tail 에 작업 push
+ *              not_empty signal 로 worker 깨움
+ *
+ * worker_main()
+ *      |
+ *      +--> queue 가 비어 있으면 cond_wait()
+ *      +--> 작업이 들어오면 head 에서 pop
+ *      +--> mutex 를 풀고 task.function(task.arg) 실행
+ *
+ * 종료 흐름:
+ * thread_pool_destroy()
+ *      |
+ *      +--> stopping = 1
+ *      +--> 모든 worker 깨움
+ *      +--> 이미 queue 에 들어온 작업은 처리 후 종료
+ *      +--> thread join 후 메모리 해제
+ *
+ * 왜 필요한가:
+ * 클라이언트 요청마다 thread 를 새로 만들면 비용이 크고 제어가 어렵다.
+ * thread pool 은 정해진 worker 수 안에서 요청을 병렬 처리하고, queue 로 과부하를 흡수한다.
+ * ============================================================================
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -118,6 +162,16 @@ struct ThreadPool {
     ThreadCond not_full;
 };
 
+/*
+ * worker thread 의 main loop.
+ *
+ * 핵심 규칙:
+ * - queue 확인/수정은 mutex 안에서만 한다.
+ * - 실제 요청 처리(task.function)는 mutex 밖에서 한다.
+ *
+ * 두 번째 규칙이 중요하다. handle_client() 가 DB/API 작업을 하는 동안
+ * queue lock 을 잡고 있으면 다른 worker 가 다음 작업을 못 꺼낸다.
+ */
 static THREAD_RET worker_main(void *arg) {
     ThreadPool *pool = (ThreadPool *)arg;
 
@@ -154,6 +208,10 @@ static THREAD_RET worker_main(void *arg) {
 #endif
 }
 
+/*
+ * 생성 중 실패했거나 destroy 마지막 단계에서 pool 이 가진 heap 메모리를 정리한다.
+ * OS thread join/condition/mutex 정리는 caller 쪽에서 끝낸 뒤 호출한다.
+ */
 static void cleanup_pool(ThreadPool *pool) {
     if (pool == NULL) {
         return;
@@ -164,6 +222,18 @@ static void cleanup_pool(ThreadPool *pool) {
     free(pool);
 }
 
+/*
+ * thread pool 을 만든다.
+ *
+ * worker_count:
+ * - 동시에 HTTP 요청을 처리할 worker 수
+ *
+ * queue_capacity:
+ * - worker 가 모두 바쁠 때 잠시 쌓아둘 요청 수
+ *
+ * 실패 시:
+ * - 이미 만든 thread/메모리를 thread_pool_destroy() 또는 cleanup_pool() 로 정리한다.
+ */
 ThreadPool *thread_pool_create(size_t worker_count,
                                size_t queue_capacity,
                                char *error_buf,
@@ -219,6 +289,14 @@ ThreadPool *thread_pool_create(size_t worker_count,
     return pool;
 }
 
+/*
+ * accept loop 가 client 작업을 queue 에 넣을 때 호출한다.
+ *
+ * 분기:
+ * - queue 에 빈 칸 있음: 바로 tail 에 push
+ * - queue 가 가득 참: not_full 신호가 올 때까지 대기
+ * - stopping 상태: 더 이상 새 작업을 받지 않고 실패 반환
+ */
 int thread_pool_submit(ThreadPool *pool, ThreadPoolTaskFn function, void *arg) {
     if (pool == NULL || function == NULL) {
         return 0;
@@ -250,6 +328,12 @@ int thread_pool_submit(ThreadPool *pool, ThreadPoolTaskFn function, void *arg) {
     return 1;
 }
 
+/*
+ * 서버 종료 시 worker 들을 안전하게 멈춘다.
+ *
+ * 이 구현은 "이미 queue 에 들어간 작업"을 버리지 않는다.
+ * stopping 을 켠 뒤 worker 를 모두 깨우고, worker 가 남은 작업을 비운 뒤 종료하게 한다.
+ */
 void thread_pool_destroy(ThreadPool *pool) {
     size_t index;
 

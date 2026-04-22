@@ -2,6 +2,72 @@
 #define _POSIX_C_SOURCE 200112L
 #endif
 
+/*
+ * ============================================================================
+ * [Mini DBMS API Server 코드 리뷰용 흐름 지도]
+ * ============================================================================
+ *
+ * 이 파일의 역할:
+ * - TCP 소켓으로 HTTP 요청을 받는다.
+ * - /health, /query, /metrics 라우트를 구분한다.
+ * - /query 요청이면 SQL 문자열을 뽑아 DbApi 로 전달한다.
+ * - 기존 week7 SQL 엔진의 CSV 결과를 Thunder Client 에서 보기 쉬운 JSON 으로 감싼다.
+ *
+ * 전체 호출 흐름:
+ *
+ * [Thunder Client]
+ *      |
+ *      v
+ * server_main.c:main()
+ *      |  서버 설정(host/port/data-dir/thread 수)을 만든다.
+ *      v
+ * api_server_run()
+ *      |  DB 엔진 초기화, thread pool 생성, listen socket 준비
+ *      v
+ * open_listener()
+ *      |  bind/listen 으로 클라이언트 접속 대기 상태를 만든다.
+ *      v
+ * accept() loop
+ *      |  클라이언트 연결 1개당 ClientTask 생성
+ *      v
+ * thread_pool_submit(..., handle_client, task)
+ *      |  실제 HTTP 처리 작업을 worker thread 에게 맡긴다.
+ *      v
+ * handle_client()
+ *      |
+ *      +--> read_http_request()
+ *      |       HTTP request line, header, body 를 읽는다.
+ *      |
+ *      +--> [라우트 분기]
+ *              |
+ *              +-- OPTIONS        -> CORS 사전 요청 응답
+ *              +-- GET /health    -> 서버 준비 상태 응답
+ *              +-- GET /metrics   -> 누적 요청 통계 응답
+ *              +-- POST /query    -> handle_query()
+ *              +-- 그 외          -> 404 JSON 에러
+ *
+ * POST /query 세부 흐름:
+ *
+ * handle_query()
+ *      |
+ *      +--> extract_sql_text()
+ *      |       body 가 {"sql":"..."} 이면 JSON 에서 SQL 추출
+ *      |       body 가 raw text 이면 앞뒤 공백 제거 후 그대로 SQL 사용
+ *      |
+ *      +--> db_api_execute_sql()
+ *      |       기존 SQL 엔진을 호출한다. 자세한 mutex/캡처 흐름은 db_api.c 참고.
+ *      |
+ *      +--> format_query_body()
+ *              성공: {"ok":true, "result":"CSV...", "columns":[], "rows":[], "stats":...}
+ *              실패: {"ok":false, "error":"..."}
+ *
+ * 중요한 설계 선택:
+ * - 클라이언트 연결 처리는 thread pool 로 병렬 처리한다.
+ * - 기존 DB 엔진 자체는 thread-safe 하게 만들어진 코드가 아니므로 DbApi 내부 mutex 로 직렬화한다.
+ * - HTTP keep-alive 는 구현하지 않고 요청 1개 처리 후 연결을 닫는다. 과제 시연에는 이 방식이 단순하고 충분하다.
+ * ============================================================================
+ */
+
 #include "api_server.h"
 
 #include "db_api.h"
@@ -108,6 +174,11 @@ typedef struct {
     ApiSocket client;
 } ClientTask;
 
+/*
+ * 문자열의 일부만 heap 문자열로 복사한다.
+ * HTTP body, CSV field, JSON 문자열 조립처럼 "원본 버퍼의 일부"를
+ * 독립적으로 보관해야 할 때 사용한다.
+ */
 static char *duplicate_range(const char *text, size_t length) {
     char *copy = (char *)malloc(length + 1);
 
@@ -120,6 +191,10 @@ static char *duplicate_range(const char *text, size_t length) {
     return copy;
 }
 
+/*
+ * HTTP 헤더 이름은 대소문자를 구분하지 않는다.
+ * 그래서 Content-Length 와 content-length 를 같은 값으로 보기 위해 사용한다.
+ */
 static int starts_with_ci(const char *text, const char *prefix, size_t prefix_len) {
     size_t index;
 
@@ -134,12 +209,20 @@ static int starts_with_ci(const char *text, const char *prefix, size_t prefix_le
     return 1;
 }
 
+/*
+ * read_http_request() 가 body 를 heap 에 만들기 때문에 요청 처리가 끝나면
+ * 반드시 이 함수로 정리한다.
+ */
 static void request_free(HttpRequest *request) {
     free(request->body);
     request->body = NULL;
     request->body_len = 0;
 }
 
+/*
+ * HTTP header 와 body 의 경계는 빈 줄이다.
+ * 보통 "\r\n\r\n" 이지만, 단순 테스트 클라이언트를 위해 "\n\n" 도 허용한다.
+ */
 static size_t find_header_end(const char *buffer, size_t length) {
     size_t index;
 
@@ -161,6 +244,10 @@ static size_t find_header_end(const char *buffer, size_t length) {
     return 0;
 }
 
+/*
+ * Content-Length 는 body 를 몇 byte 더 읽어야 하는지 알려준다.
+ * POST /query 에서 SQL 문자열이 body 에 들어오므로 이 값이 필요하다.
+ */
 static int parse_content_length(const char *headers, size_t header_len, size_t *content_length) {
     const char name[] = "Content-Length:";
     size_t name_len = sizeof(name) - 1;
@@ -212,6 +299,19 @@ static int parse_content_length(const char *headers, size_t header_len, size_t *
     return 1;
 }
 
+/*
+ * 클라이언트 소켓에서 HTTP 요청 1개를 끝까지 읽는다.
+ *
+ * 처리 단계:
+ * 1. header 끝(\r\n\r\n)을 찾을 때까지 recv() 반복
+ * 2. request line 에서 method/path 추출
+ * 3. Content-Length 만큼 body 를 추가로 읽음
+ * 4. body 만 request->body 로 복사
+ *
+ * 왜 필요한가:
+ * TCP 는 "메시지 단위"가 아니라 byte stream 이다. recv() 한 번에 요청 전체가
+ * 온다는 보장이 없으므로 header/body 길이를 직접 확인하며 모아야 한다.
+ */
 static int read_http_request(ApiSocket client,
                              size_t max_body_bytes,
                              HttpRequest *request,
@@ -310,6 +410,10 @@ static int read_http_request(ApiSocket client,
     return 1;
 }
 
+/*
+ * raw text body 로 들어온 SQL 의 앞뒤 공백을 제거한다.
+ * Thunder Client 의 Body > Text 탭에서 SQL 을 붙여 넣는 경우 이 경로를 탄다.
+ */
 static char *duplicate_trimmed_body(const char *body, size_t body_len) {
     size_t start = 0;
     size_t end = body_len;
@@ -325,6 +429,10 @@ static char *duplicate_trimmed_body(const char *body, size_t body_len) {
     return duplicate_range(body + start, end - start);
 }
 
+/*
+ * JSON body 에서 "sql" 필드만 꺼내는 작은 파서다.
+ * 과제 API 계약이 단순하므로 외부 JSON 라이브러리 없이 필요한 범위만 처리한다.
+ */
 static char *extract_json_sql_string(const char *body, size_t body_len) {
     size_t index;
 
@@ -395,6 +503,13 @@ static char *extract_json_sql_string(const char *body, size_t body_len) {
     return NULL;
 }
 
+/*
+ * /query body 를 최종 SQL 문자열로 변환한다.
+ *
+ * 분기:
+ * - body 첫 글자가 '{' 이면 {"sql":"..."} 형태로 보고 extract_json_sql_string()
+ * - 아니면 raw SQL 로 보고 duplicate_trimmed_body()
+ */
 static char *extract_sql_text(const char *body, size_t body_len) {
     size_t index = 0;
 
@@ -409,6 +524,10 @@ static char *extract_sql_text(const char *body, size_t body_len) {
     return duplicate_trimmed_body(body, body_len);
 }
 
+/*
+ * 엔진 출력/에러 문자열을 JSON 문자열 값에 안전하게 넣기 위해 escape 한다.
+ * 예: 줄바꿈은 \n, 큰따옴표는 \" 로 바꾼다.
+ */
 static char *json_escape(const char *text) {
     size_t input_len = strlen(text);
     size_t capacity = input_len * 6 + 1;
@@ -458,6 +577,10 @@ typedef struct {
     size_t length;
 } CsvFieldRef;
 
+/*
+ * 응답 JSON 은 길이가 동적으로 커진다.
+ * StringBuilder 는 realloc 으로 버퍼를 키우며 문자열을 안전하게 이어 붙이는 도구다.
+ */
 static int builder_init(StringBuilder *builder, size_t initial_capacity) {
     builder->data = (char *)malloc(initial_capacity);
     if (builder->data == NULL) {
@@ -477,6 +600,10 @@ static void builder_free(StringBuilder *builder) {
     builder->capacity = 0;
 }
 
+/*
+ * 현재 capacity 로 부족하면 2배씩 늘린다.
+ * append 마다 정확한 크기로 realloc 하지 않기 때문에 큰 SELECT 결과도 비교적 효율적으로 만든다.
+ */
 static int builder_reserve(StringBuilder *builder, size_t additional) {
     size_t required = builder->length + additional + 1;
     size_t new_capacity;
@@ -614,6 +741,22 @@ static void fill_csv_field_refs(const char *start, size_t length, CsvFieldRef *f
     }
 }
 
+/*
+ * 기존 SQL 엔진은 결과를 CSV 텍스트로 출력한다.
+ * 이 함수는 그 CSV 를 분석해서 API 응답에 columns/rows/rowCount 를 추가한다.
+ *
+ * 예:
+ *   id,name,email,age\n
+ *   2,KIM,a@b.com,20\n
+ *
+ * 변환:
+ *   "columns":["id","name","email","age"],
+ *   "rows":[{"id":"2","name":"KIM","email":"a@b.com","age":"20"}],
+ *   "rowCount":1
+ *
+ * 왜 필요한가:
+ * Thunder Client 에서 단순 문자열보다 JSON row 배열이 훨씬 확인하기 쉽다.
+ */
 static int append_table_projection_json(StringBuilder *builder, const char *csv_output) {
     const char *cursor = csv_output;
     const char *header_start = cursor;
@@ -734,6 +877,10 @@ static int append_table_projection_json(StringBuilder *builder, const char *csv_
     return 1;
 }
 
+/*
+ * append_table_projection_json() 의 결과를 heap 문자열로 반환하는 wrapper.
+ * 실패하면 NULL 이고, 성공하면 caller 가 free 해야 한다.
+ */
 static char *format_table_projection_json(const char *csv_output) {
     StringBuilder builder;
 
@@ -749,6 +896,17 @@ static char *format_table_projection_json(const char *csv_output) {
     return builder.data;
 }
 
+/*
+ * DbApiResult 를 최종 HTTP response body 로 바꾼다.
+ *
+ * 성공 분기:
+ * - result: 기존 엔진의 CSV 원문
+ * - columns/rows/rowCount: Thunder Client 용 구조화 결과
+ * - stats: 인덱스 사용 여부, 스캔/매칭 row 수, 실행 시간
+ *
+ * 실패 분기:
+ * - error 문자열만 담아 400 응답으로 내려간다.
+ */
 static char *format_query_body(const DbApiResult *result) {
     char *escaped;
     char *table_projection;
@@ -806,6 +964,9 @@ static char *format_query_body(const DbApiResult *result) {
     return body;
 }
 
+/*
+ * 여러 worker thread 가 동시에 요청 수를 올릴 수 있으므로 metrics_mutex 로 보호한다.
+ */
 static void metrics_record(ApiServer *server, int is_query, int ok) {
     metrics_mutex_lock(&server->metrics_mutex);
     ++server->metrics.total_requests;
@@ -849,6 +1010,10 @@ static char *format_metrics_body(ApiServer *server) {
     return body;
 }
 
+/*
+ * send() 는 요청한 byte 를 한 번에 모두 보내지 못할 수 있다.
+ * 그래서 남은 길이가 0 이 될 때까지 반복 전송한다.
+ */
 static int send_all(ApiSocket client, const char *data, size_t length) {
     size_t sent = 0;
 
@@ -871,6 +1036,10 @@ static int send_all(ApiSocket client, const char *data, size_t length) {
     return 1;
 }
 
+/*
+ * HTTP header 와 JSON body 를 클라이언트에게 보낸다.
+ * 이 서버는 요청 1개 처리 후 연결을 닫으므로 Connection: close 를 명시한다.
+ */
 static int send_json(ApiSocket client, int status, const char *reason, const char *body) {
     char header[512];
     size_t body_len = strlen(body);
@@ -897,6 +1066,9 @@ static int send_json(ApiSocket client, int status, const char *reason, const cha
     return send_all(client, header, (size_t)header_len) && send_all(client, body, body_len);
 }
 
+/*
+ * 라우팅/파싱 단계에서 실패했을 때 공통 JSON 에러를 내려준다.
+ */
 static void send_error(ApiServer *server, ApiSocket client, int status, const char *reason, const char *message) {
     char *escaped = json_escape(message);
     char *body;
@@ -924,6 +1096,15 @@ static void send_error(ApiServer *server, ApiSocket client, int status, const ch
     free(escaped);
 }
 
+/*
+ * POST /query 의 핵심 처리 함수.
+ *
+ * 흐름:
+ * 1. HTTP body 에서 SQL 문자열 추출
+ * 2. DbApi 를 통해 기존 SQL 엔진 실행
+ * 3. 엔진 결과를 JSON body 로 변환
+ * 4. 성공이면 200, SQL/파싱 실패면 400 응답
+ */
 static void handle_query(ApiServer *server, ApiSocket client, const HttpRequest *request) {
     char *sql_text;
     DbApiResult result;
@@ -966,6 +1147,20 @@ static void handle_query(ApiServer *server, ApiSocket client, const HttpRequest 
     free(sql_text);
 }
 
+/*
+ * worker thread 가 실제로 실행하는 함수.
+ *
+ * 분기 시나리오:
+ * - HTTP 요청 자체를 못 읽음     -> 400 Bad Request
+ * - OPTIONS                     -> CORS 사전 요청 성공
+ * - GET /health                 -> 서버 alive 확인
+ * - GET /metrics                -> 누적 통계 확인
+ * - POST /query                 -> SQL 처리(handle_query)
+ * - 등록되지 않은 method/path    -> 404 Not Found
+ *
+ * task 는 api_server_run() 의 accept loop 에서 malloc 되었으므로
+ * 함수 시작 직후 free 한다. client socket 은 응답 후 항상 닫는다.
+ */
 static void handle_client(void *arg) {
     ClientTask *task = (ClientTask *)arg;
     ApiServer *server = task->server;
@@ -1009,6 +1204,10 @@ static void handle_client(void *arg) {
     API_CLOSE_SOCKET(client);
 }
 
+/*
+ * Windows 에서는 소켓 API 사용 전에 WSAStartup 이 필요하다.
+ * Linux/macOS 에서는 별도 초기화가 필요 없어서 no-op 이다.
+ */
 static int network_startup(char *error_buf, size_t error_buf_size) {
 #if defined(_WIN32)
     WSADATA data;
@@ -1031,6 +1230,15 @@ static void network_cleanup(void) {
 #endif
 }
 
+/*
+ * host:port 로 listen socket 을 만든다.
+ *
+ * 단계:
+ * 1. getaddrinfo 로 bind 가능한 주소 후보를 얻음
+ * 2. socket 생성
+ * 3. bind 로 host:port 점유
+ * 4. listen 으로 accept 가능한 상태 전환
+ */
 static ApiSocket open_listener(const char *host, int port, char *error_buf, size_t error_buf_size) {
     struct addrinfo hints;
     struct addrinfo *result = NULL;
@@ -1094,6 +1302,21 @@ static ApiSocket open_listener(const char *host, int port, char *error_buf, size
     return listener;
 }
 
+/*
+ * API 서버의 최상위 실행 함수.
+ *
+ * 시퀀스:
+ * 1. metrics mutex 준비
+ * 2. DbApi 초기화: data_dir 의 테이블/인덱스를 사용할 준비
+ * 3. thread pool 생성: 요청 병렬 처리를 위한 worker 준비
+ * 4. network_startup/open_listener
+ * 5. accept 무한 루프
+ * 6. 연결 1개마다 ClientTask 를 만들어 thread_pool_submit()
+ *
+ * 중요한 분리:
+ * - accept loop 는 "연결을 받는 일"만 한다.
+ * - handle_client 는 worker thread 안에서 "요청을 처리하는 일"을 한다.
+ */
 int api_server_run(const ApiServerConfig *config, char *error_buf, size_t error_buf_size) {
     ApiServer server;
     ApiSocket listener;

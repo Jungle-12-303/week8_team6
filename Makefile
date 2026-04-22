@@ -3,16 +3,16 @@ CFLAGS = -std=c11 -Wall -Wextra -pedantic -Iinclude
 THREAD_LIBS = -pthread
 
 COMMON_SRCS = \
-	src/engine.c \
-	src/util.c \
-	src/ast.c \
-	src/tokenizer.c \
-	src/parser.c \
-	src/optimizer.c \
-	src/storage.c \
-	src/executor.c \
-	src/database.c \
-	src/bptree.c
+	src/sql/engine.c \
+	src/common/util.c \
+	src/sql/ast.c \
+	src/sql/tokenizer.c \
+	src/sql/parser.c \
+	src/sql/optimizer.c \
+	src/storage/storage.c \
+	src/sql/executor.c \
+	src/storage/database.c \
+	src/storage/bptree.c
 
 TARGET = mini_sql
 TEST_TARGET = mini_sql_tests
@@ -23,12 +23,12 @@ SEED_TARGET = mini_sql_seed
 DOCKER_DATA_VOLUME = mini-sql-bptree-data
 DOCKER_LOG_VOLUME = mini-sql-bptree-logs
 
-TARGET_SRCS = src/main.c $(COMMON_SRCS)
-TEST_SRCS = src/test_main.c $(COMMON_SRCS)
-API_SERVER_SRCS = src/server_main.c src/api_server.c src/thread_pool.c src/db_api.c $(COMMON_SRCS)
-API_TEST_SRCS = tests/api_tests.c src/thread_pool.c src/db_api.c $(COMMON_SRCS)
-BENCH_SRCS = src/benchmark_main.c $(COMMON_SRCS)
-SEED_SRCS = src/seed_main.c $(COMMON_SRCS)
+TARGET_SRCS = src/apps/main.c $(COMMON_SRCS)
+TEST_SRCS = src/apps/test_main.c $(COMMON_SRCS)
+API_SERVER_SRCS = src/apps/server_main.c src/api/api_server.c src/concurrency/thread_pool.c src/api/db_api.c $(COMMON_SRCS)
+API_TEST_SRCS = tests/api_tests.c src/concurrency/thread_pool.c src/api/db_api.c $(COMMON_SRCS)
+BENCH_SRCS = src/apps/benchmark_main.c $(COMMON_SRCS)
+SEED_SRCS = src/apps/seed_main.c $(COMMON_SRCS)
 
 TARGET_OBJS = $(TARGET_SRCS:.c=.o)
 TEST_OBJS = $(TEST_SRCS:.c=.o)
@@ -60,7 +60,8 @@ $(SEED_TARGET): $(SEED_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(SEED_OBJS)
 
 clean:
-	rm -f $(TARGET) $(TEST_TARGET) $(API_SERVER_TARGET) $(API_TEST_TARGET) $(BENCH_TARGET) $(SEED_TARGET) src/*.o tests/*.o
+	rm -f $(TARGET) $(TEST_TARGET) $(API_SERVER_TARGET) $(API_TEST_TARGET) $(BENCH_TARGET) $(SEED_TARGET) \
+		$(TARGET_OBJS) $(TEST_OBJS) $(API_SERVER_OBJS) $(API_TEST_OBJS) $(BENCH_OBJS) $(SEED_OBJS) tests/*.o
 
 docker-build:
 	docker build -t mini-sql-bptree .

@@ -1,5 +1,49 @@
 #include "database.h"
 
+/*
+ * ============================================================================
+ * [Database 실행 계층 코드 리뷰용 흐름 지도]
+ * ============================================================================
+ *
+ * 이 파일의 역할:
+ * - CSV 테이블 파일(.tbl)을 읽고 쓴다.
+ * - id 컬럼 기준 B+ tree 인덱스(.idx)를 열거나 재생성한다.
+ * - SELECT/INSERT 실행 시 실제 row 탐색과 저장을 담당한다.
+ *
+ * API 요청에서 여기까지 오는 흐름:
+ *
+ * POST /query
+ *      |
+ *      v
+ * db_api_execute_sql()
+ *      |
+ *      v
+ * sql_engine_execute_sql()
+ *      |
+ *      +--> SELECT 이면 database_execute_select()
+ *      |       |
+ *      |       +--> load_table()
+ *      |       +--> id WHERE 가능하면 execute_indexed_select()
+ *      |       +--> 아니면 execute_linear_select()
+ *      |
+ *      +--> INSERT 이면 database_execute_insert()
+ *              |
+ *              +--> load_table()
+ *              +--> build_insert_row()
+ *              +--> 파일 append
+ *              +--> bptree_insert()
+ *
+ * 인덱스 재생성 분기:
+ * - users.idx 가 없거나 비어 있음
+ * - users.tbl row 수와 users.idx key 수가 다름
+ * - users.tbl 이 users.idx 보다 최근에 수정됨
+ *
+ * 위 조건이면 load_table() 에서 rebuild_index() 를 호출한다.
+ * 이 로직 덕분에 기존 데이터 파일을 복사해 오거나 INSERT 테스트 후에도
+ * WHERE id 검색이 오래된 offset 을 보지 않는다.
+ * ============================================================================
+ */
+
 #include "bptree.h"
 #include "util.h"
 
@@ -236,6 +280,14 @@ static int load_schema(FILE *file,
     return 1;
 }
 
+/*
+ * .tbl 파일을 처음부터 끝까지 읽으며 id -> 파일 offset 인덱스를 만든다.
+ *
+ * row_offset:
+ * - 해당 row 가 파일의 몇 byte 위치에서 시작하는지 나타낸다.
+ * - B+ tree 에 저장해두면 WHERE id = n 검색 때 파일 전체를 스캔하지 않고
+ *   그 위치로 바로 fseek 할 수 있다.
+ */
 static int build_index(DatabaseTable *table, FILE *file, char *error_buf, size_t error_buf_size) {
     char line[8192];
 
@@ -286,6 +338,10 @@ static int build_index(DatabaseTable *table, FILE *file, char *error_buf, size_t
     return 1;
 }
 
+/*
+ * 테이블 파일의 실제 row 수를 센다.
+ * 기존 인덱스 key 수와 비교해서 인덱스가 최신인지 판단하기 위한 검증 단계다.
+ */
 static int count_table_rows(FILE *file, long data_start, size_t *out_row_count, char *error_buf, size_t error_buf_size) {
     char line[8192];
     size_t row_count = 0;
@@ -309,6 +365,10 @@ static int count_table_rows(FILE *file, long data_start, size_t *out_row_count, 
     return 1;
 }
 
+/*
+ * .tbl 파일이 .idx 파일보다 나중에 수정되었는지 확인한다.
+ * 테이블만 복사/수정되고 인덱스가 그대로면 offset 정보가 틀릴 수 있기 때문이다.
+ */
 static int table_file_newer_than_index(const char *table_path, const char *index_path) {
     struct stat table_stat;
     struct stat index_stat;
@@ -320,6 +380,11 @@ static int table_file_newer_than_index(const char *table_path, const char *index
     return table_stat.st_mtime > index_stat.st_mtime;
 }
 
+/*
+ * 오래되었거나 비어 있는 인덱스를 버리고 .tbl 기준으로 다시 만든다.
+ * 시연 중 "SELECT * FROM users WHERE id = 777777" 같은 검색이 실제 row 를
+ * 정확히 읽어오게 만드는 안전장치다.
+ */
 static int rebuild_index(DatabaseTable *table, FILE *file, long data_start, char *error_buf, size_t error_buf_size) {
     /*
      * If users.tbl was copied, edited, or seeded separately from users.idx, the
@@ -340,6 +405,18 @@ static int rebuild_index(DatabaseTable *table, FILE *file, long data_start, char
     return build_index(table, file, error_buf, error_buf_size);
 }
 
+/*
+ * SELECT/INSERT 전에 테이블 메타데이터와 B+ tree 인덱스를 준비한다.
+ *
+ * 이미 로드된 테이블:
+ * - database->tables 에 캐시되어 있으므로 바로 반환한다.
+ *
+ * 처음 보는 테이블:
+ * - .tbl/.idx 경로 생성
+ * - schema(header) 로드
+ * - 실제 row 수와 인덱스 상태 비교
+ * - 필요하면 rebuild_index()
+ */
 static int load_table(Database *database,
                       const char *table_name,
                       DatabaseTable **out_table,
@@ -613,6 +690,15 @@ static int index_visit_callback(int key, long value, void *context) {
     return 1;
 }
 
+/*
+ * WHERE id 조건이 있을 때 B+ tree 로 빠르게 찾는 SELECT 경로.
+ *
+ * 흐름:
+ * 1. WHERE 값(search_key)을 정수로 파싱
+ * 2. B+ tree 에서 조건에 맞는 id key 탐색
+ * 3. 저장된 파일 offset 으로 fseek
+ * 4. row 를 읽어 필요한 컬럼만 CSV 로 출력
+ */
 static int execute_indexed_select(DatabaseTable *table,
                                   const SelectStatement *select_stmt,
                                   const size_t *output_indices,
@@ -666,6 +752,12 @@ static int execute_indexed_select(DatabaseTable *table,
     return 1;
 }
 
+/*
+ * 인덱스를 쓸 수 없는 SELECT 경로.
+ * 예: WHERE name = 'CHOI', WHERE age > 20, WHERE 없음
+ *
+ * 이 경우 .tbl 파일을 처음부터 끝까지 읽으며 row_matches_filter() 로 조건을 검사한다.
+ */
 static int execute_linear_select(DatabaseTable *table,
                                  const SelectStatement *select_stmt,
                                  const size_t *output_indices,
@@ -738,6 +830,15 @@ static int execute_linear_select(DatabaseTable *table,
     return 1;
 }
 
+/*
+ * SELECT 문의 최상위 실행 함수.
+ *
+ * 분기:
+ * - WHERE id ... 형태이면 B+ tree 인덱스 사용
+ * - 그 외 조건이면 파일 전체 scan
+ *
+ * stats->used_index/scanned_rows/matched_rows 값은 API 응답의 stats 로 전달된다.
+ */
 int database_execute_select(Database *database,
                             const SelectStatement *select_stmt,
                             FILE *output,
@@ -827,6 +928,15 @@ static void free_literal_array(Literal *values, size_t count) {
     free(values);
 }
 
+/*
+ * INSERT 문에 들어온 column/value 목록을 실제 테이블 컬럼 순서에 맞게 재배열한다.
+ *
+ * 지원하는 형태:
+ * - INSERT INTO users VALUES (...)
+ * - INSERT INTO users (name, email, age) VALUES (...)
+ *
+ * id 가 생략되면 table->next_id 로 자동 부여한다.
+ */
 static int build_insert_row(const DatabaseTable *table,
                             const InsertStatement *insert_stmt,
                             Literal **out_values,
@@ -931,6 +1041,17 @@ static int build_insert_row(const DatabaseTable *table,
     return 1;
 }
 
+/*
+ * INSERT 문의 최상위 실행 함수.
+ *
+ * 흐름:
+ * 1. load_table() 로 테이블/인덱스 준비
+ * 2. build_insert_row() 로 저장할 row 완성
+ * 3. id 중복 여부를 B+ tree 에서 확인
+ * 4. .tbl 파일 끝에 row append
+ * 5. 새 id -> 파일 offset 을 B+ tree 에 추가
+ * 6. next_id/row_count 갱신
+ */
 int database_execute_insert(Database *database,
                             const InsertStatement *insert_stmt,
                             FILE *output,
