@@ -19,7 +19,7 @@
   </defs>
   <rect width="1280" height="680" fill="#f8fafc"/>
   <text x="50" y="58" class="title">데이터 저장 구조: users.tbl + users.idx</text>
-  <text x="52" y="86" class="sub">B+ Tree는 row 자체가 아니라 users.tbl 안의 파일 offset을 저장한다.</text>
+  <text x="52" y="86" class="sub">B+ Tree는 row 자체가 아니라 users.tbl 안의 파일 offset을 저장한다. 아래 offset 숫자는 이해를 돕기 위한 예시다.</text>
 
   <rect x="70" y="140" width="510" height="430" rx="16" fill="#fff7ed" stroke="#fdba74" filter="url(#shadow)"/>
   <text x="325" y="180" text-anchor="middle" class="head">users.tbl</text>
@@ -62,5 +62,5 @@
   <path d="M 1045 405 C 720 560 590 490 550 488" class="dash"/>
 
   <rect x="375" y="600" width="530" height="50" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
-  <text x="640" y="631" text-anchor="middle" class="head">WHERE id = 777777 → B+ Tree에서 offset 찾기 → users.tbl 해당 위치로 fseek</text>
+  <text x="640" y="631" text-anchor="middle" class="head">예시: WHERE id = 777777 → B+ Tree에서 offset 찾기 → users.tbl 해당 위치로 fseek</text>
 </svg>

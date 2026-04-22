@@ -81,13 +81,13 @@
   <text x="1059" y="735" text-anchor="middle" class="note">CSV result + stats</text>
 
   <path d="M 970 775 L 800 775" class="return"/>
-  <text x="885" y="765" text-anchor="middle" class="note">성공/실패</text>
+  <text x="885" y="765" text-anchor="middle" class="note">성공/실패, FILE* 결과 캡처</text>
 
   <path d="M 800 730 C 755 708 755 680 800 658" class="return"/>
   <text x="720" y="704" text-anchor="middle" class="note">mutex_unlock()</text>
 
   <path d="M 800 610 C 715 632 690 650 630 665" class="return"/>
-  <text x="704" y="640" text-anchor="middle" class="note">DbApiResult</text>
+  <text x="704" y="640" text-anchor="middle" class="note">DbApiResult(output, stats)</text>
 
   <path d="M 630 700 L 120 700" class="return"/>
   <text x="375" y="688" text-anchor="middle" class="msg">HTTP 200/400 JSON response</text>

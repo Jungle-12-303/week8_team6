@@ -4,103 +4,230 @@
 
 발표 한 줄 요약:
 
-> Thunder Client에서 SQL을 HTTP로 보내면, 서버는 worker thread에 요청을 배정하고, 내부에서는 기존 SQL 엔진과 B+ Tree 인덱스를 재사용해 SELECT/INSERT 결과를 JSON으로 반환합니다.
+> 지난주 SQL 처리기와 B+ Tree 인덱스를 내부 DB 엔진으로 재사용하고, 그 앞에 C 기반 HTTP API 서버와 Thread Pool을 붙여 외부 클라이언트가 SQL을 실행할 수 있게 만들었습니다.
 
-## 발표 핵심
+## 4분 발표 흐름
 
+| 시간 | 설명할 내용 | 보여줄 자료 |
+|---:|---|---|
+| 0:00 - 0:30 | 과제 목표와 우리가 만든 결과물 | 요구사항 대응표 |
+| 0:30 - 1:10 | 전체 아키텍처 | 전체 아키텍처 그림 |
+| 1:10 - 1:50 | `POST /query` 요청 1개가 처리되는 과정 | 요청 처리 시퀀스 그림 |
+| 1:50 - 2:30 | Thread Pool과 동시성 처리 | Thread Pool 그림 |
+| 2:30 - 3:10 | 기존 SQL 엔진과 B+ Tree 인덱스 재사용 | SQL 실행 분기, 저장 구조 그림 |
+| 3:10 - 4:00 | Thunder Client 시연 | `/health`, `/query`, `/metrics` |
+
+## 1. 과제 목표와 구현 결과
+
+이번 주 과제는 **미니 DBMS - API 서버**입니다.
+
+핵심 요구사항은 다음 네 가지입니다.
+
+- 외부 클라이언트가 API로 DBMS 기능을 사용할 수 있어야 합니다.
+- Thread Pool을 구성하고 SQL 요청을 병렬 처리해야 합니다.
+- 이전 차수 SQL 처리기와 B+ Tree 인덱스를 그대로 활용해야 합니다.
 - 구현 언어는 C입니다.
-- API 서버는 `GET /health`, `POST /query`, `GET /metrics`를 제공합니다.
-- 요청 처리는 Thread Pool 기반입니다.
-- 기존 SQL 처리기와 B+ Tree 인덱스를 새 API 서버 안에 연결했습니다.
-- 기존 DB 엔진은 공유 파일과 인덱스를 다루므로, DB 실행 구간은 mutex로 보호했습니다.
-- Thunder Client에서 결과를 보기 쉽게 CSV 원문과 JSON `columns`, `rows`, `stats`를 함께 반환합니다.
 
-## 요구사항 대응표
+구현 결과:
 
 | 과제 요구사항 | 구현 내용 | 확인 위치 |
 |---|---|---|
-| 미니 DBMS - API 서버 구현 | C HTTP 서버 구현, `/query`로 SQL 실행 | `src/api/api_server.c` |
-| 외부 클라이언트에서 DBMS 기능 사용 | Thunder Client에서 HTTP 요청으로 SELECT/INSERT 실행 | `POST /query` |
-| Thread Pool 구성 | 고정 worker thread + bounded queue | `src/concurrency/thread_pool.c` |
-| 요청마다 스레드 할당 | accept된 client 작업을 queue에 넣고 worker가 처리 | `thread_pool_submit()` |
-| SQL 요청 처리 | body에서 SQL 추출 후 기존 엔진 호출 | `handle_query()` |
-| 이전 SQL 처리기 재사용 | Tokenizer, Parser, Optimizer, Executor 유지 | `src/sql/` |
-| B+ Tree 인덱스 재사용 | `id -> row offset` 인덱스 기반 조회 | `src/storage/bptree.c`, `src/storage/database.c` |
-| 멀티 스레드 동시성 이슈 | worker는 병렬, 공유 DB 엔진 실행 구간은 mutex 보호 | `src/api/db_api.c` |
-| API 서버 아키텍처 | API 계층, Thread Pool, DB Adapter, SQL Engine, Storage 분리 | `src/` 폴더 구조 |
+| API 서버 구현 | C HTTP 서버, `/query`로 SQL 실행 | `src/api/api_server.c` |
+| 외부 클라이언트 사용 | Thunder Client에서 SELECT/INSERT 실행 | `POST /query` |
+| Thread Pool | worker thread + bounded queue | `src/concurrency/thread_pool.c` |
+| 요청마다 worker 처리 | accept된 client 작업을 queue에 넣고 worker가 처리 | `thread_pool_submit()` |
+| 기존 SQL 처리기 재사용 | Tokenizer, Parser, Optimizer, Executor 유지 | `src/sql/` |
+| B+ Tree 인덱스 재사용 | `id -> row offset` 인덱스 기반 조회 | `src/storage/bptree.c` |
+| 동시성 이슈 처리 | worker는 병렬, DB 엔진 실행 구간은 mutex 보호 | `src/api/db_api.c` |
 
-## 전체 아키텍처
+발표 멘트:
+
+```text
+API 서버 자체는 새로 만들었지만, SQL을 해석하고 실행하는 내부 엔진은 지난주 코드를 재사용했습니다.
+이번 주 핵심은 기존 엔진 앞에 HTTP API 계층과 Thread Pool 계층을 붙인 것입니다.
+```
+
+## 2. 전체 아키텍처
 
 ![전체 아키텍처](docs/assets/architecture.svg)
 
-## 요청 처리 시퀀스
+설명 순서:
+
+- Thunder Client가 HTTP로 SQL을 보냅니다.
+- `api_server.c`가 HTTP 요청을 읽고 `/query` 라우트로 보냅니다.
+- Thread Pool의 worker가 요청을 처리합니다.
+- `db_api.c`가 기존 SQL 엔진을 호출합니다.
+- SQL 엔진은 `Tokenizer -> Parser -> Optimizer -> Executor` 흐름을 그대로 사용합니다.
+- Storage 계층은 `users.tbl`과 `users.idx`를 사용합니다.
+- 최종 결과는 API 서버에서 JSON으로 포맷되어 응답됩니다.
+
+비판적으로 봐야 할 점:
+
+- `db_api.c`가 JSON을 직접 만드는 것은 아닙니다. `db_api.c`는 `DbApiResult`를 반환하고, JSON 포맷은 `api_server.c`가 담당합니다.
+- Thread Pool은 요청을 병렬로 받지만, 기존 DB 엔진 자체는 mutex로 보호됩니다.
+
+## 3. 요청 처리 시퀀스
 
 ![요청 처리 시퀀스](docs/assets/request-sequence.svg)
 
-## Thread Pool과 동시성 설계
+`POST /query` 하나를 기준으로 보면 다음 순서입니다.
+
+1. Thunder Client가 SQL body를 전송합니다.
+2. API 서버가 연결을 accept하고 `ClientTask`를 queue에 넣습니다.
+3. worker thread가 task를 꺼냅니다.
+4. worker가 HTTP method, path, body를 읽습니다.
+5. body에서 SQL 문자열을 추출합니다.
+6. `db_api_execute_sql()`이 기존 SQL 엔진을 호출합니다.
+7. DB 실행 구간은 mutex로 보호됩니다.
+8. 엔진 출력은 `FILE*`에서 문자열로 캡처됩니다.
+9. API 서버가 JSON body를 만들어 응답합니다.
+
+발표 멘트:
+
+```text
+HTTP 요청 처리와 JSON 응답 생성은 worker별로 병렬 처리됩니다.
+다만 기존 엔진이 공유 파일과 B+ Tree 인덱스를 사용하므로, 실제 SQL 실행 구간만 mutex로 감쌌습니다.
+```
+
+## 4. Thread Pool과 동시성 설계
 
 ![Thread Pool과 동시성 설계](docs/assets/thread-pool.svg)
 
-동시성 판단:
+핵심 판단:
 
-- 여러 client 연결은 worker thread들이 병렬로 받습니다.
-- HTTP parsing, routing, response formatting은 worker별로 독립 실행됩니다.
-- 기존 SQL 엔진은 파일과 B+ Tree 인덱스를 공유하므로 SQL 실행 구간은 mutex로 한 번에 하나씩 보호합니다.
-- 이 선택은 성능보다 데이터 정합성을 우선한 설계입니다.
-- 개선 방향은 `SELECT`는 read lock, `INSERT`는 write lock으로 분리하는 것입니다.
+- 요청마다 새 thread를 만들지 않고, 미리 만든 worker thread를 재사용합니다.
+- accept loop는 연결을 받는 역할만 합니다.
+- 실제 요청 처리는 worker thread가 수행합니다.
+- `/health`, `/metrics`는 DB lock 없이 응답합니다.
+- `/query`만 기존 DB 엔진 접근 구간에서 mutex를 탑니다.
 
-## SQL 실행 분기
+왜 mutex를 썼는가:
+
+- 기존 SQL 엔진은 thread-safe하게 작성된 구조가 아닙니다.
+- `users.tbl`과 `users.idx`를 여러 thread가 동시에 건드리면 파일 offset, B+ Tree 상태가 꼬일 수 있습니다.
+- 그래서 API 요청 접수는 병렬로 처리하되, SQL 실행 구간은 정합성을 위해 직렬화했습니다.
+
+방어 포인트:
+
+```text
+완전한 병렬 DB 엔진은 아닙니다.
+이번 구현은 API 서버와 요청 처리 구조는 병렬화했고,
+기존 DB 엔진의 공유 상태는 mutex로 보호한 구조입니다.
+```
+
+## 5. 기존 SQL 엔진과 B+ Tree 재사용
 
 ![SQL 실행 분기](docs/assets/sql-flow.svg)
 
-인덱스 사용 기준:
+SELECT 분기:
 
-- `WHERE id = 777777`
-- `WHERE id >= 999990`
-- `WHERE id < 10`
-- `WHERE id != 3`
+- `WHERE id ...` 조건이면 B+ Tree 인덱스를 사용합니다.
+- `WHERE name ...`, `WHERE email ...`, `WHERE age ...` 같은 non-id 조건은 선형 탐색합니다.
 
-선형 탐색 기준:
+INSERT 분기:
 
-- `WHERE name = 'CHOIHYUNJIN'`
-- `WHERE email = 'guswls1478@gmail.com'`
-- `WHERE age >= 20`
-- `WHERE`가 없는 전체 조회
+- 들어온 값을 테이블 컬럼 순서에 맞게 정렬합니다.
+- id가 없으면 자동 부여합니다.
+- `users.tbl` 끝에 row를 append합니다.
+- 새 id와 row offset을 B+ Tree에 추가합니다.
 
-## 데이터 저장 구조
+## 6. 데이터 저장 구조
 
 ![데이터 저장 구조](docs/assets/storage-index.svg)
 
 핵심:
 
-- row 데이터는 `.tbl` 파일에 저장됩니다.
-- B+ Tree는 `.idx` 파일에 저장됩니다.
-- 인덱스 value는 row 자체가 아니라 `.tbl` 안의 파일 offset입니다.
-- 따라서 `WHERE id = ?` 조회는 전체 파일을 읽지 않고 offset 위치로 바로 이동합니다.
+- row 데이터는 `users.tbl`에 저장됩니다.
+- B+ Tree 인덱스는 `users.idx`에 저장됩니다.
+- 인덱스 value는 row 자체가 아니라 `users.tbl` 안의 파일 offset입니다.
+- `WHERE id = ?` 조회는 B+ Tree에서 offset을 찾고, 해당 위치로 `fseek`해서 row를 읽습니다.
+- 그림의 offset 숫자는 이해를 돕기 위한 예시입니다.
 
-## API 명세
+발표 멘트:
 
-| Method | URL | 역할 |
-|---|---|---|
-| `GET` | `/health` | 서버 준비 상태 확인 |
-| `POST` | `/query` | SQL 실행 |
-| `GET` | `/metrics` | 요청 처리 통계 확인 |
+```text
+B+ Tree가 row 전체를 들고 있는 것이 아니라, row가 파일의 몇 번째 byte 위치에 있는지를 들고 있습니다.
+그래서 id 조건 조회는 전체 파일을 스캔하지 않고 해당 offset으로 바로 이동할 수 있습니다.
+```
 
-`POST /query`는 두 가지 body를 지원합니다.
+## 7. 시연 순서
 
-Raw SQL:
+### 7.1 서버 실행
+
+VS Code 터미널에서 프로젝트 폴더를 엽니다.
+
+```powershell
+cd "C:\Users\cedis\Downloads\idea(backjoon)\week8\mini_dbms_api_server"
+```
+
+빌드:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build.ps1
+```
+
+서버 실행:
+
+```powershell
+.\mini_sql_server.exe --data-dir runtime_data --host 127.0.0.1 --port 8080 --threads 4
+```
+
+### 7.2 Thunder Client 요청
+
+1. 서버 상태 확인
+
+```text
+GET http://127.0.0.1:8080/health
+```
+
+기대 결과:
+
+```json
+{"ok":true,"status":"ready"}
+```
+
+2. B+ Tree 인덱스 조회
+
+```text
+POST http://127.0.0.1:8080/query
+```
+
+Body:
 
 ```sql
 SELECT * FROM users WHERE id = 777777;
 ```
 
-JSON:
+확인할 것:
 
-```json
-{"sql":"SELECT * FROM users WHERE id = 777777;"}
+- `rows`에 실제 사용자 데이터가 보입니다.
+- `stats.usedIndex`가 `true`입니다.
+- `stats.scannedRows`가 작게 나옵니다.
+
+3. INSERT
+
+```sql
+INSERT INTO users (name, email, age) VALUES ('TEAM6_API_USER', 'team6-api-user@example.com', 26);
 ```
 
-응답 예시:
+4. 방금 넣은 row 조회
+
+```sql
+SELECT * FROM users WHERE email = 'team6-api-user@example.com';
+```
+
+확인할 것:
+
+- non-id 조건이므로 `usedIndex`는 `false`입니다.
+- 그래도 API 서버를 통해 DBMS 기능이 정상 동작합니다.
+
+5. 요청 통계 확인
+
+```text
+GET http://127.0.0.1:8080/metrics
+```
+
+## 8. API 응답 예시
 
 ```json
 {
@@ -125,67 +252,13 @@ JSON:
 }
 ```
 
-## 시연 순서
+응답에서 볼 포인트:
 
-### 1. VS Code에서 서버 실행
+- `result`: 기존 엔진의 CSV 출력 원문입니다.
+- `columns`, `rows`, `rowCount`: Thunder Client에서 보기 좋게 추가한 JSON 구조입니다.
+- `stats`: 인덱스 사용 여부와 조회 row 수를 보여줍니다.
 
-프로젝트 폴더:
-
-```powershell
-cd "C:\Users\cedis\Downloads\idea(backjoon)\week8\mini_dbms_api_server"
-```
-
-빌드:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build.ps1
-```
-
-서버 실행:
-
-```powershell
-.\mini_sql_server.exe --data-dir runtime_data --host 127.0.0.1 --port 8080 --threads 4
-```
-
-### 2. Thunder Client 요청
-
-상태 확인:
-
-```text
-GET http://127.0.0.1:8080/health
-```
-
-인덱스 조회:
-
-```text
-POST http://127.0.0.1:8080/query
-```
-
-Body:
-
-```sql
-SELECT * FROM users WHERE id = 777777;
-```
-
-INSERT:
-
-```sql
-INSERT INTO users (name, email, age) VALUES ('TEAM6_API_USER', 'team6-api-user@example.com', 26);
-```
-
-non-id 조건 조회:
-
-```sql
-SELECT * FROM users WHERE email = 'team6-api-user@example.com';
-```
-
-통계 확인:
-
-```text
-GET http://127.0.0.1:8080/metrics
-```
-
-## MacBook / Docker 실행
+## 9. MacBook / Docker 실행
 
 MacBook에서는 Docker 실행을 권장합니다. Windows와 macOS의 C 컴파일러 차이를 줄이고 같은 Linux 환경에서 시연할 수 있습니다.
 
@@ -200,7 +273,7 @@ Thunder Client에서는 동일하게 호출합니다.
 http://127.0.0.1:8080/query
 ```
 
-## 파일 구조
+## 10. 파일 구조
 
 ```text
 src/
@@ -232,7 +305,7 @@ src/
 
 자세한 함수별 설명과 줄 번호는 `CODE_REVIEW_GUIDE.md`에 정리되어 있습니다.
 
-## 테스트
+## 11. 테스트
 
 Windows:
 
@@ -259,17 +332,10 @@ docker run --rm mini-sql-bptree ./mini_sql_api_tests
 - stale index 감지 후 재생성
 - `POST /query` 응답 JSON 구조
 
-## 차별점
-
-- Thunder Client에서 바로 보기 좋은 `columns`, `rows`, `rowCount` JSON 응답을 추가했습니다.
-- `/metrics`로 총 요청 수, query 요청 수, 성공/실패 응답 수를 확인할 수 있습니다.
-- `.tbl`과 `.idx`가 어긋났을 때 row 수와 수정 시간을 비교해 인덱스를 재생성합니다.
-- Windows는 `build.ps1`, macOS/Linux는 Docker로 같은 시연 흐름을 제공합니다.
-
 ## 발표 마무리 문장
 
 ```text
-이번 구현의 핵심은 새 DBMS를 다시 만든 것이 아니라,
+이번 구현은 새 DBMS를 다시 만든 것이 아니라,
 지난주 SQL 처리기와 B+ Tree 인덱스를 내부 엔진으로 재사용하고,
 그 앞에 C 기반 HTTP API 서버와 Thread Pool을 붙여 외부 클라이언트가 사용할 수 있게 만든 것입니다.
 동시성은 Thread Pool로 요청을 병렬 처리하되,

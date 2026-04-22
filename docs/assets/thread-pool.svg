@@ -22,7 +22,7 @@
   </defs>
   <rect width="1280" height="640" fill="url(#bg)"/>
   <text x="50" y="58" class="title">Thread Pool과 동시성 설계</text>
-  <text x="52" y="86" class="sub">요청 접수는 병렬, 기존 DB 엔진 실행 구간은 mutex로 보호</text>
+  <text x="52" y="86" class="sub">요청 접수는 병렬, POST /query의 기존 DB 엔진 실행 구간만 mutex로 보호</text>
 
   <rect x="55" y="220" width="170" height="95" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#shadow)"/>
   <text x="140" y="255" text-anchor="middle" class="label">accept loop</text>
@@ -52,7 +52,7 @@
 
   <rect x="1065" y="220" width="165" height="95" rx="12" fill="#ffedd5" stroke="#fdba74" filter="url(#shadow)"/>
   <text x="1148" y="255" text-anchor="middle" class="label">DB mutex</text>
-  <text x="1148" y="282" text-anchor="middle" class="small">SQL 실행 직렬화</text>
+  <text x="1148" y="282" text-anchor="middle" class="small">POST /query SQL 실행만</text>
 
   <rect x="980" y="500" width="235" height="75" rx="12" fill="#fee2e2" stroke="#fca5a5" filter="url(#shadow)"/>
   <text x="1098" y="531" text-anchor="middle" class="label">기존 SQL Engine</text>
@@ -73,5 +73,6 @@
 
   <rect x="70" y="480" width="760" height="88" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
   <text x="95" y="515" class="label">핵심 판단</text>
-  <text x="95" y="544" class="small">worker는 여러 개라 HTTP 요청을 동시에 처리한다. 하지만 기존 DB 엔진은 공유 파일과 인덱스를 쓰므로 mutex로 보호한다.</text>
+  <text x="95" y="540" class="small">worker는 여러 HTTP 요청을 동시에 처리한다. /health, /metrics는 DB lock 없이 응답한다.</text>
+  <text x="95" y="563" class="small">/query만 기존 DB 엔진 접근 구간을 DB mutex로 보호한다.</text>
 </svg>
