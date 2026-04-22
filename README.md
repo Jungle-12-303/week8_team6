@@ -98,7 +98,10 @@ HTTP 요청 처리와 JSON 응답 생성은 worker별로 병렬 처리됩니다.
 핵심 판단:
 
 - 요청마다 새 thread를 만들지 않고, 미리 만든 worker thread를 재사용합니다.
-- accept loop는 연결을 받는 역할만 합니다.
+- OS accept backlog는 `accept()` 되기 전 연결이 서버 OS 커널에서 기다리는 곳입니다.
+- Thread Pool queue는 `accept()` 된 뒤 `ClientTask`가 worker를 기다리는 프로그램 내부 queue입니다.
+- Thread Pool queue가 가득 차면 `thread_pool_submit()`이 빈칸이 생길 때까지 기다리고, 이 동안 accept loop는 다음 `accept()`를 호출하지 못합니다.
+- 그래서 submit에서 못 넣은 요청이 OS backlog로 되돌아가는 것이 아니라, 그 이후 새 연결들이 아직 `accept()`되지 못해 OS backlog에 남습니다.
 - 실제 요청 처리는 worker thread가 수행합니다.
 - `/health`, `/metrics`는 DB lock 없이 응답합니다.
 - `/query`만 기존 DB 엔진 접근 구간에서 mutex를 탑니다.

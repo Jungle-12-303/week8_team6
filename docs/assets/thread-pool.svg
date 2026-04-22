@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Thread Pool과 동시성 설계">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Thread Pool queue와 OS accept backlog 분리">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#f8fafc"/>
       <stop offset="100%" stop-color="#eef7f1"/>
     </linearGradient>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
-      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#111827" flood-opacity="0.16"/>
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#111827" flood-opacity="0.15"/>
     </filter>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
@@ -16,63 +16,90 @@
       .sub { font-size: 15px; fill:#526070; }
       .label { font-size: 17px; font-weight: 800; }
       .small { font-size: 13px; fill:#475569; }
+      .tiny { font-size: 12px; fill:#64748b; }
       .arrow { stroke:#334155; stroke-width:3; fill:none; marker-end:url(#arrow); }
-      .thin { stroke:#64748b; stroke-width:2.5; fill:none; marker-end:url(#arrow); }
+      .thin { stroke:#64748b; stroke-width:2.3; fill:none; marker-end:url(#arrow); }
+      .dash { stroke:#ef4444; stroke-width:2.6; fill:none; stroke-dasharray:7 5; marker-end:url(#arrow); }
+      .softDash { stroke:#0f766e; stroke-width:2.4; fill:none; stroke-dasharray:7 5; marker-end:url(#arrow); }
     </style>
   </defs>
+
   <rect width="1280" height="640" fill="url(#bg)"/>
-  <text x="50" y="58" class="title">Thread Pool과 동시성 설계</text>
-  <text x="52" y="86" class="sub">요청 접수는 병렬, POST /query의 기존 DB 엔진 실행 구간만 mutex로 보호</text>
+  <text x="50" y="58" class="title">Thread Pool queue와 OS accept backlog는 다른 대기 장소</text>
+  <text x="52" y="86" class="sub">queue가 가득 차면 submit이 backlog로 되돌리는 것이 아니라, accept loop가 멈추고 이후 새 연결이 OS backlog에서 기다린다.</text>
 
-  <rect x="55" y="220" width="170" height="95" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#shadow)"/>
-  <text x="140" y="255" text-anchor="middle" class="label">accept loop</text>
-  <text x="140" y="282" text-anchor="middle" class="small">client 연결 수락</text>
+  <rect x="45" y="140" width="175" height="110" rx="14" fill="#ffffff" stroke="#cbd5e1" filter="url(#shadow)"/>
+  <text x="132" y="176" text-anchor="middle" class="label">Clients</text>
+  <text x="132" y="205" text-anchor="middle" class="small">Thunder Client</text>
+  <text x="132" y="226" text-anchor="middle" class="small">동시 접속 요청</text>
 
-  <rect x="280" y="220" width="190" height="95" rx="12" fill="#dbeafe" stroke="#93c5fd" filter="url(#shadow)"/>
-  <text x="375" y="255" text-anchor="middle" class="label">submit</text>
-  <text x="375" y="282" text-anchor="middle" class="small">thread_pool_submit()</text>
+  <rect x="280" y="120" width="220" height="150" rx="16" fill="#fef3c7" stroke="#f59e0b" filter="url(#shadow)"/>
+  <text x="390" y="154" text-anchor="middle" class="label">OS accept backlog</text>
+  <text x="390" y="181" text-anchor="middle" class="small">아직 accept() 안 된 연결</text>
+  <text x="390" y="205" text-anchor="middle" class="tiny">위치: 서버 OS 커널</text>
+  <rect x="315" y="224" width="150" height="26" rx="7" fill="#ffffff" stroke="#fde68a"/>
+  <text x="390" y="242" text-anchor="middle" class="tiny">connection wait list</text>
 
-  <rect x="540" y="150" width="210" height="230" rx="16" fill="#ecfdf5" stroke="#86efac" filter="url(#shadow)"/>
-  <text x="645" y="184" text-anchor="middle" class="label">bounded queue</text>
-  <rect x="580" y="215" width="130" height="34" rx="7" fill="#ffffff" stroke="#bbf7d0"/>
-  <text x="645" y="238" text-anchor="middle" class="small">ClientTask #1</text>
-  <rect x="580" y="260" width="130" height="34" rx="7" fill="#ffffff" stroke="#bbf7d0"/>
-  <text x="645" y="283" text-anchor="middle" class="small">ClientTask #2</text>
-  <rect x="580" y="305" width="130" height="34" rx="7" fill="#ffffff" stroke="#bbf7d0"/>
-  <text x="645" y="328" text-anchor="middle" class="small">ClientTask #3</text>
+  <rect x="560" y="120" width="190" height="150" rx="16" fill="#dbeafe" stroke="#93c5fd" filter="url(#shadow)"/>
+  <text x="655" y="154" text-anchor="middle" class="label">accept loop</text>
+  <text x="655" y="181" text-anchor="middle" class="small">accept(listener)</text>
+  <text x="655" y="205" text-anchor="middle" class="tiny">연결 1개를 프로그램으로 가져옴</text>
+  <text x="655" y="236" text-anchor="middle" class="tiny">api_server_run()</text>
 
-  <rect x="825" y="95" width="170" height="70" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#shadow)"/>
-  <text x="910" y="138" text-anchor="middle" class="label">worker 1</text>
-  <rect x="825" y="190" width="170" height="70" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#shadow)"/>
-  <text x="910" y="233" text-anchor="middle" class="label">worker 2</text>
-  <rect x="825" y="285" width="170" height="70" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#shadow)"/>
-  <text x="910" y="328" text-anchor="middle" class="label">worker 3</text>
-  <rect x="825" y="380" width="170" height="70" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#shadow)"/>
-  <text x="910" y="423" text-anchor="middle" class="label">worker 4</text>
+  <rect x="810" y="120" width="205" height="150" rx="16" fill="#e0f2fe" stroke="#38bdf8" filter="url(#shadow)"/>
+  <text x="912" y="154" text-anchor="middle" class="label">thread_pool_submit()</text>
+  <text x="912" y="181" text-anchor="middle" class="small">ClientTask를 queue에 push</text>
+  <text x="912" y="205" text-anchor="middle" class="tiny">queue에 빈칸 있으면 즉시 통과</text>
+  <text x="912" y="236" text-anchor="middle" class="tiny">queue full이면 not_full 대기</text>
 
-  <rect x="1065" y="220" width="165" height="95" rx="12" fill="#ffedd5" stroke="#fdba74" filter="url(#shadow)"/>
-  <text x="1148" y="255" text-anchor="middle" class="label">DB mutex</text>
-  <text x="1148" y="282" text-anchor="middle" class="small">POST /query SQL 실행만</text>
+  <path d="M 220 195 L 275 195" class="arrow"/>
+  <text x="250" y="182" text-anchor="middle" class="tiny">connect</text>
+  <path d="M 500 195 L 555 195" class="arrow"/>
+  <text x="528" y="182" text-anchor="middle" class="tiny">accept()</text>
+  <path d="M 750 195 L 805 195" class="arrow"/>
+  <text x="778" y="182" text-anchor="middle" class="tiny">accepted socket</text>
 
-  <rect x="980" y="500" width="235" height="75" rx="12" fill="#fee2e2" stroke="#fca5a5" filter="url(#shadow)"/>
-  <text x="1098" y="531" text-anchor="middle" class="label">기존 SQL Engine</text>
-  <text x="1098" y="558" text-anchor="middle" class="small">users.tbl / users.idx 공유</text>
+  <rect x="520" y="320" width="250" height="110" rx="16" fill="#fee2e2" stroke="#fca5a5" filter="url(#shadow)"/>
+  <text x="645" y="354" text-anchor="middle" class="label">submit 대기 1개</text>
+  <text x="645" y="381" text-anchor="middle" class="small">이미 accept된 client</text>
+  <text x="645" y="404" text-anchor="middle" class="small">queue가 찰 때 여기서 멈춤</text>
+  <text x="645" y="423" text-anchor="middle" class="tiny">OS backlog가 아니라 user process 안</text>
 
-  <path d="M 225 268 L 275 268" class="arrow"/>
-  <path d="M 470 268 L 535 268" class="arrow"/>
-  <path d="M 750 250 C 790 225 790 130 820 130" class="thin"/>
-  <path d="M 750 265 L 820 225" class="thin"/>
-  <path d="M 750 285 L 820 320" class="thin"/>
-  <path d="M 750 300 C 790 330 790 415 820 415" class="thin"/>
+  <rect x="80" y="360" width="350" height="95" rx="14" fill="#fff1f2" stroke="#fb7185" filter="url(#shadow)"/>
+  <text x="255" y="392" text-anchor="middle" class="label">submit이 막힌 동안</text>
+  <text x="255" y="420" text-anchor="middle" class="small">accept loop가 다음 accept()를 못 부름</text>
+  <text x="255" y="442" text-anchor="middle" class="small">이후 새 연결은 OS backlog에서 대기</text>
 
-  <path d="M 995 130 C 1040 150 1055 220 1065 250" class="thin"/>
-  <path d="M 995 225 L 1060 260" class="thin"/>
-  <path d="M 995 320 L 1060 275" class="thin"/>
-  <path d="M 995 415 C 1040 385 1055 315 1065 285" class="thin"/>
-  <path d="M 1148 315 L 1105 495" class="arrow"/>
+  <path d="M 840 270 C 780 315 735 320 695 320" class="dash"/>
+  <text x="765" y="304" text-anchor="middle" class="tiny" fill="#dc2626">queue full</text>
+  <path d="M 560 355 C 455 325 360 300 390 270" class="dash"/>
 
-  <rect x="70" y="480" width="760" height="88" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
-  <text x="95" y="515" class="label">핵심 판단</text>
-  <text x="95" y="540" class="small">worker는 여러 HTTP 요청을 동시에 처리한다. /health, /metrics는 DB lock 없이 응답한다.</text>
-  <text x="95" y="563" class="small">/query만 기존 DB 엔진 접근 구간을 DB mutex로 보호한다.</text>
+  <rect x="1060" y="105" width="180" height="250" rx="18" fill="#ecfdf5" stroke="#86efac" filter="url(#shadow)"/>
+  <text x="1150" y="140" text-anchor="middle" class="label">Thread Pool queue</text>
+  <text x="1150" y="164" text-anchor="middle" class="small">accept 후 대기</text>
+  <rect x="1100" y="190" width="100" height="30" rx="7" fill="#ffffff" stroke="#bbf7d0"/>
+  <text x="1150" y="211" text-anchor="middle" class="tiny">ClientTask</text>
+  <rect x="1100" y="230" width="100" height="30" rx="7" fill="#ffffff" stroke="#bbf7d0"/>
+  <text x="1150" y="251" text-anchor="middle" class="tiny">ClientTask</text>
+  <rect x="1100" y="270" width="100" height="30" rx="7" fill="#ffffff" stroke="#bbf7d0"/>
+  <text x="1150" y="291" text-anchor="middle" class="tiny">ClientTask</text>
+  <text x="1150" y="326" text-anchor="middle" class="tiny">bounded capacity</text>
+
+  <path d="M 1015 195 L 1055 205" class="arrow"/>
+  <text x="1037" y="182" text-anchor="middle" class="tiny">push</text>
+  <path d="M 770 375 C 885 405 1010 335 1060 305" class="softDash"/>
+  <text x="910" y="395" text-anchor="middle" class="tiny">worker가 pop하면 not_full 신호로 submit 재개</text>
+
+  <rect x="115" y="445" width="790" height="85" rx="16" fill="#ffffff" stroke="#cbd5e1" filter="url(#shadow)"/>
+  <text x="510" y="480" text-anchor="middle" class="label">worker threads (4)</text>
+  <text x="510" y="508" text-anchor="middle" class="small">Thread Pool queue에서 ClientTask를 pop하고 handle_client() 실행</text>
+
+  <rect x="1010" y="430" width="210" height="105" rx="16" fill="#ffedd5" stroke="#fdba74" filter="url(#shadow)"/>
+  <text x="1115" y="466" text-anchor="middle" class="label">DB mutex</text>
+  <text x="1115" y="492" text-anchor="middle" class="small">POST /query만 진입</text>
+  <text x="1115" y="514" text-anchor="middle" class="small">기존 SQL Engine 보호</text>
+
+  <path d="M 1150 355 C 1120 400 960 415 820 445" class="thin"/>
+  <text x="1030" y="405" text-anchor="middle" class="tiny">worker가 queue에서 pop</text>
+  <path d="M 905 488 L 1005 488" class="thin"/>
 </svg>
