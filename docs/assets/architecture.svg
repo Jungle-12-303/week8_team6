@@ -36,12 +36,13 @@
       .arrowText { font-size: 13px; fill:#475569; font-weight:700; }
       .line { stroke:#334155; stroke-width:3; fill:none; marker-end:url(#arrow); }
       .thin { stroke:#64748b; stroke-width:2.2; fill:none; marker-end:url(#arrow); }
+      .return { stroke:#0f766e; stroke-width:3; fill:none; stroke-dasharray:7 5; marker-end:url(#arrow); }
     </style>
   </defs>
 
   <rect width="1280" height="760" fill="url(#bg)"/>
   <text x="50" y="58" class="title">Week8 Mini DBMS API Server - 전체 아키텍처</text>
-  <text x="52" y="86" class="sub">외부 HTTP 요청 → Thread Pool worker → DbApiResult → API Server JSON 포맷 → HTTP 응답</text>
+  <text x="52" y="86" class="sub">외부 HTTP 요청 → worker → db_api.c → 기존 SQL 엔진 → db_api.c(DbApiResult) → api_server.c(JSON) → HTTP 응답</text>
 
   <rect x="45" y="130" width="170" height="110" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#shadow)"/>
   <text x="130" y="166" text-anchor="middle" class="boxTitle">Thunder Client</text>
@@ -64,11 +65,11 @@
   <text x="910" y="146" text-anchor="middle" class="layer">DB Adapter Layer</text>
   <text x="910" y="181" text-anchor="middle" class="boxTitle">db_api.c</text>
   <text x="910" y="207" text-anchor="middle" class="boxBody">mutex 보호</text>
-  <text x="910" y="229" text-anchor="middle" class="boxBody">DbApiResult 반환</text>
+  <text x="910" y="229" text-anchor="middle" class="boxBody">SQL 엔진 호출/결과 캡처</text>
 
   <rect x="1080" y="115" width="150" height="150" rx="14" fill="#ffffff" stroke="#cbd5e1" filter="url(#shadow)"/>
-  <text x="1155" y="154" text-anchor="middle" class="boxTitle">HTTP JSON</text>
-  <text x="1155" y="181" text-anchor="middle" class="boxBody">api_server.c formats</text>
+  <text x="1155" y="154" text-anchor="middle" class="boxTitle">api_server.c</text>
+  <text x="1155" y="181" text-anchor="middle" class="boxBody">JSON response</text>
   <text x="1155" y="204" text-anchor="middle" class="boxBody">columns, rows</text>
   <text x="1155" y="226" text-anchor="middle" class="boxBody">stats</text>
 
@@ -79,7 +80,7 @@
   <path d="M 750 185 L 800 185" class="line"/>
   <text x="775" y="172" text-anchor="middle" class="arrowText">SQL</text>
   <path d="M 1015 185 L 1075 185" class="line"/>
-  <text x="1045" y="172" text-anchor="middle" class="arrowText">DbApiResult</text>
+  <text x="1045" y="172" text-anchor="middle" class="arrowText">DbApiResult 반환</text>
 
   <rect x="230" y="355" width="820" height="145" rx="16" fill="#ffffff" stroke="#cbd5e1" filter="url(#shadow)"/>
   <text x="640" y="388" text-anchor="middle" class="layer">Existing SQL Engine</text>
@@ -95,7 +96,10 @@
   <path d="M 610 439 L 650 439" class="thin"/>
   <path d="M 800 439 L 840 439" class="thin"/>
 
-  <path d="M 910 265 C 910 315 640 310 640 355" class="line"/>
+  <path d="M 910 265 C 910 315 710 310 640 355" class="line"/>
+  <text x="790" y="315" text-anchor="middle" class="arrowText">SQL 엔진 호출</text>
+  <path d="M 650 355 C 715 320 875 320 895 265" class="return"/>
+  <text x="773" y="344" text-anchor="middle" class="arrowText">엔진 출력 캡처</text>
 
   <rect x="275" y="585" width="270" height="100" rx="14" fill="url(#red)" stroke="#e87b65" filter="url(#shadow)"/>
   <text x="410" y="621" text-anchor="middle" class="layer">users.tbl</text>
