@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-label="100회 요청 로그 비교">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#111827" flood-opacity="0.16"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <style>
+      text { font-family: "Malgun Gothic", "Apple SD Gothic Neo", Inter, sans-serif; fill:#172033; }
+      .title { font-size:30px; font-weight:800; }
+      .sub { font-size:15px; fill:#526070; }
+      .cardTitle { font-size:24px; font-weight:800; }
+      .metric { font-size:36px; font-weight:900; }
+      .label { font-size:15px; fill:#475569; font-weight:700; }
+      .small { font-size:13px; fill:#64748b; }
+      .body { font-size:16px; fill:#334155; }
+      .axis { stroke:#94a3b8; stroke-width:2; }
+      .barText { font-size:13px; fill:#172033; font-weight:800; }
+      .arrow { stroke:#334155; stroke-width:3; fill:none; marker-end:url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1280" height="720" fill="#f8fafc"/>
+  <text x="50" y="58" class="title">100회 요청 로그 비교: /health vs /query</text>
+  <text x="52" y="86" class="sub">같은 API 서버라도 DB 엔진을 타지 않는 요청과 mutex 보호 SQL 요청은 대기 특성이 다르다.</text>
+
+  <rect x="65" y="125" width="530" height="250" rx="18" fill="#ecfeff" stroke="#67e8f9" filter="url(#shadow)"/>
+  <text x="100" y="170" class="cardTitle">GET /health</text>
+  <text x="100" y="203" class="body">DB 엔진을 거치지 않는 상태 확인 요청</text>
+  <text x="100" y="255" class="metric">4.01 ms</text>
+  <text x="100" y="284" class="label">평균 응답 시간</text>
+  <text x="365" y="255" class="metric">100 / 100</text>
+  <text x="365" y="284" class="label">HTTP 200 성공</text>
+  <text x="100" y="325" class="small">min 0.93 ms · p50 2.27 ms · p95 13.38 ms · max 14.47 ms</text>
+
+  <rect x="685" y="125" width="530" height="250" rx="18" fill="#fff7ed" stroke="#fdba74" filter="url(#shadow)"/>
+  <text x="720" y="170" class="cardTitle">POST /query</text>
+  <text x="720" y="203" class="body">Thread Pool worker → DbApi → mutex → SQL Engine</text>
+  <text x="720" y="255" class="metric">16.85 s</text>
+  <text x="720" y="284" class="label">평균 end-to-end 시간</text>
+  <text x="985" y="255" class="metric">100 / 100</text>
+  <text x="985" y="284" class="label">HTTP 200 성공</text>
+  <text x="720" y="325" class="small">min 0.49 s · p50 16.58 s · p95 31.66 s · max 33.28 s</text>
+
+  <rect x="65" y="430" width="1150" height="210" rx="16" fill="#ffffff" stroke="#cbd5e1" filter="url(#shadow)"/>
+  <text x="100" y="475" class="cardTitle">해석</text>
+  <text x="100" y="513" class="body">/health는 HTTP parsing과 JSON 응답만 수행하므로 대부분 ms 단위로 끝난다.</text>
+  <text x="100" y="548" class="body">/query는 기존 SQL 엔진과 users.tbl/users.idx 접근 구간을 mutex로 보호한다.</text>
+  <text x="100" y="583" class="body">100회 요청이 몰리면 worker는 병렬로 요청을 받지만, SQL 실행 구간에서 순서대로 대기 시간이 누적된다.</text>
+
+  <line x1="665" y1="472" x2="1120" y2="472" class="axis"/>
+  <rect x="665" y="500" width="35" height="28" rx="5" fill="#67e8f9"/>
+  <text x="712" y="520" class="barText">health avg 4.01 ms</text>
+  <rect x="665" y="545" width="365" height="28" rx="5" fill="#fdba74"/>
+  <text x="690" y="565" class="barText">query avg 16.85 s</text>
+  <path d="M 1035 560 L 1110 560" class="arrow"/>
+  <text x="665" y="612" class="small">주의: 단일 요청 처리 시간 비교가 아니라, 100회 요청 로그의 end-to-end total 기준 비교다.</text>
+</svg>
