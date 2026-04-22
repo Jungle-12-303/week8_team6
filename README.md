@@ -31,105 +31,15 @@
 
 ## 전체 아키텍처
 
-```mermaid
-flowchart TB
-    Client["Thunder Client<br/>외부 클라이언트"]
-
-    subgraph ApiLayer["API Server Layer"]
-        Main["server_main.c<br/>서버 설정/실행"]
-        Api["api_server.c<br/>HTTP parsing<br/>routing<br/>JSON response"]
-    end
-
-    subgraph Concurrency["Concurrency Layer"]
-        Queue["bounded task queue"]
-        Workers["worker threads<br/>handle_client()"]
-    end
-
-    subgraph Adapter["DB Adapter Layer"]
-        DbApi["db_api.c<br/>SQL 엔진 호출<br/>mutex 보호<br/>결과 캡처"]
-    end
-
-    subgraph SqlEngine["Existing SQL Engine"]
-        Tokenizer["Tokenizer"]
-        Parser["Parser"]
-        Optimizer["Optimizer"]
-        Executor["Executor"]
-    end
-
-    subgraph Storage["Storage Layer"]
-        Table["users.tbl<br/>CSV row data"]
-        Index["users.idx<br/>B+ Tree index<br/>key=id, value=file offset"]
-    end
-
-    Client -->|"HTTP request"| Api
-    Main --> Api
-    Api -->|"task submit"| Queue
-    Queue --> Workers
-    Workers --> DbApi
-    DbApi --> Tokenizer --> Parser --> Optimizer --> Executor
-    Executor --> Table
-    Executor --> Index
-    Index -->|"row offset"| Table
-    DbApi -->|"DbApiResult"| Workers
-    Workers -->|"HTTP JSON response"| Client
-```
+![전체 아키텍처](docs/assets/architecture.svg)
 
 ## 요청 처리 시퀀스
 
-```mermaid
-sequenceDiagram
-    participant C as Thunder Client
-    participant A as API Server
-    participant Q as Thread Pool Queue
-    participant W as Worker Thread
-    participant D as DbApi
-    participant E as SQL Engine
-    participant S as Storage and B+Tree
-
-    C->>A: POST /query<br/>SQL body 전송
-    A->>Q: ClientTask 등록
-    Q->>W: 쉬고 있던 worker가 task pop
-    W->>W: read_http_request()<br/>method/path/body 읽기
-    W->>W: extract_sql_text()<br/>raw SQL 또는 JSON sql 추출
-    W->>D: db_api_execute_sql(sql)
-    D->>D: mutex_lock()<br/>공유 DB 엔진 보호
-    D->>E: sql_engine_execute_sql()
-    E->>S: SELECT 또는 INSERT 실행
-    S-->>E: CSV 출력과 QueryStats
-    E-->>D: 실행 성공 또는 실패
-    D->>D: 결과 FILE*을 문자열로 캡처
-    D->>D: mutex_unlock()
-    D-->>W: DbApiResult
-    W->>W: format_query_body()<br/>JSON 응답 생성
-    W-->>C: HTTP 200 또는 400 JSON response
-```
+![요청 처리 시퀀스](docs/assets/request-sequence.svg)
 
 ## Thread Pool과 동시성 설계
 
-```mermaid
-flowchart LR
-    Accept["accept loop<br/>새 client 연결 수락"]
-    Submit["thread_pool_submit()"]
-    Queue["bounded queue<br/>작업 대기열"]
-    W1["worker 1"]
-    W2["worker 2"]
-    W3["worker 3"]
-    W4["worker 4"]
-    DbLock["DB mutex<br/>기존 엔진 공유 상태 보호"]
-    Engine["SQL Engine<br/>users.tbl/users.idx 접근"]
-
-    Accept --> Submit --> Queue
-    Queue --> W1
-    Queue --> W2
-    Queue --> W3
-    Queue --> W4
-
-    W1 --> DbLock
-    W2 --> DbLock
-    W3 --> DbLock
-    W4 --> DbLock
-    DbLock --> Engine
-```
+![Thread Pool과 동시성 설계](docs/assets/thread-pool.svg)
 
 동시성 판단:
 
@@ -141,32 +51,7 @@ flowchart LR
 
 ## SQL 실행 분기
 
-```mermaid
-flowchart TB
-    SQL["SQL text"]
-    Engine["sql_engine_execute_sql()"]
-    Kind{"statement type?"}
-
-    Select["database_execute_select()"]
-    Insert["database_execute_insert()"]
-
-    Where{"WHERE id 조건인가?"}
-    Indexed["execute_indexed_select()<br/>B+ Tree로 id 탐색"]
-    Linear["execute_linear_select()<br/>users.tbl 전체 scan"]
-
-    BuildRow["build_insert_row()<br/>컬럼 순서 정렬<br/>id 자동 부여"]
-    Append["users.tbl append"]
-    IndexInsert["bptree_insert(id, row_offset)"]
-
-    SQL --> Engine --> Kind
-    Kind -->|"SELECT"| Select --> Where
-    Where -->|"yes"| Indexed
-    Where -->|"no"| Linear
-    Indexed --> Result["CSV result + stats"]
-    Linear --> Result
-
-    Kind -->|"INSERT"| Insert --> BuildRow --> Append --> IndexInsert --> Result
-```
+![SQL 실행 분기](docs/assets/sql-flow.svg)
 
 인덱스 사용 기준:
 
@@ -184,29 +69,7 @@ flowchart TB
 
 ## 데이터 저장 구조
 
-```mermaid
-flowchart LR
-    subgraph TableFile["users.tbl"]
-        Header["id,name,email,age"]
-        Row1["1,Alice,a@example.com,20"]
-        Row2["2,Bob,b@example.com,25"]
-        RowN["777777,CHOIHYUNJIN,guswls1478@gmail.com,24"]
-    end
-
-    subgraph IndexFile["users.idx"]
-        BTree["B+ Tree page file"]
-        Key1["key 1 -> offset of row 1"]
-        Key2["key 2 -> offset of row 2"]
-        KeyN["key 777777 -> offset of row 777777"]
-    end
-
-    BTree --> Key1
-    BTree --> Key2
-    BTree --> KeyN
-    Key1 --> Row1
-    Key2 --> Row2
-    KeyN --> RowN
-```
+![데이터 저장 구조](docs/assets/storage-index.svg)
 
 핵심:
 
