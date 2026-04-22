@@ -118,16 +118,18 @@ HTTP 요청 처리와 JSON 응답 생성은 worker별로 병렬 처리됩니다.
 
 ## 5. 100회 요청 로그로 본 구조 차이
 
-![100회 요청 로그 비교](docs/assets/load-test-summary.svg)
+![100회 요청 로그 비교](docs/assets/load-test-trend.png)
 
 로그 해석:
 
-- `GET /health` 100회는 모두 200으로 성공했고, 평균 응답 시간이 약 4.01ms입니다.
-- `/health`는 DB 엔진을 거치지 않고 API 서버에서 바로 JSON을 반환합니다.
-- `POST /query` 100회도 모두 200으로 성공했지만, 평균 end-to-end 시간이 약 16.85초입니다.
-- `/query`는 worker가 요청을 받더라도 기존 SQL 엔진 실행 구간에서 mutex를 기다릴 수 있습니다.
-- 따라서 이 결과는 “Thread Pool은 요청을 병렬로 받지만, 기존 DB 엔진 접근은 정합성을 위해 직렬화된다”는 구조를 보여줍니다.
+- 여기서 평균은 보조 지표이고, 핵심은 **완료 순서별 total time 추세**입니다.
+- `GET /health` 100회는 모두 200으로 성공했고, DB 엔진을 거치지 않기 때문에 그래프가 거의 0초 근처에 붙어 있습니다.
+- `POST /query` 100회도 모두 200으로 성공했지만, 뒤쪽 요청으로 갈수록 end-to-end total 시간이 점점 커집니다.
+- 실제 로그 기준으로 `/query`는 첫 완료가 약 0.49초, 마지막 완료가 약 33.28초입니다.
+- 이유는 worker가 요청을 병렬로 받아도 기존 SQL 엔진 실행 구간은 mutex로 보호되어 한 번에 하나씩만 들어갈 수 있기 때문입니다.
+- 따라서 이 결과는 “Thread Pool은 요청을 병렬로 받지만, 기존 DB 엔진 접근은 정합성을 위해 직렬화되고 대기 시간이 누적된다”는 구조를 보여줍니다.
 - 원본 로그는 `docs/load-tests/health-100.txt`, `docs/load-tests/query-100-times.txt`에 보관했습니다.
+- 그래프는 `python -m pip install -r requirements-dev.txt` 후 `python tools/plot_load_tests.py`로 원본 로그에서 다시 만들 수 있습니다.
 
 주의해서 말할 점:
 
